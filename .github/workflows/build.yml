@@ -2,6 +2,7 @@ name: Build
 on:
   push:
     branches: ['*']
+    tags: ['*']
   pull_request:
     branches: ['*']
 jobs:
@@ -12,15 +13,19 @@ jobs:
           - os: ubuntu-latest
             os_short: linux
             ext: .so
+            container: registry.gitlab.steamos.cloud/steamrt/sniper/sdk:latest
           - os: windows-latest
             os_short: windows
             ext: .dll
+            container: ''
       fail-fast: false
     runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container || null }}
     name: ${{ matrix.os_short }}-x86
     steps:
       - uses: actions/checkout@v6
         with:
+          submodules: recursive
           path: project
 
       - name: Checkout SourceMod
@@ -39,18 +44,10 @@ jobs:
           path: metamod-source
 
       - uses: actions/setup-python@v6
+        if: runner.os != 'Linux'
         name: Setup Python
         with:
           python-version: '3.13'
-
-      - name: Install Python dependencies
-        run: python -m pip install --upgrade pip setuptools wheel
-
-      - name: Install AMBuild
-        run: |
-          git clone https://github.com/alliedmodders/ambuild.git
-          cd ambuild
-          python setup.py install --user
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -59,16 +56,27 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             gcc-multilib g++-multilib libstdc++6 lib32stdc++6 \
-            libc6-dev-i386 linux-libc-dev:i386
+            libc6-dev-i386 linux-libc-dev:i386 git python3 python3-pip python3-setuptools
 
-      - name: Build
+      - name: Install Python dependencies
+        run: python3 -m pip install --upgrade pip setuptools wheel
+        if: runner.os != 'Linux'
+
+      - name: Install AMBuild
+        run: |
+          git clone https://github.com/alliedmodders/ambuild.git
+          cd ambuild
+          python3 setup.py install --user
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Build extension
         working-directory: project
         shell: bash
         run: |
           mkdir build && cd build
-          python ../configure.py \
-            --sm-path="${{ github.workspace }}/sourcemod" \
-            --mms-path="${{ github.workspace }}/metamod-source" \
+          python3 ../configure.py \
+            --sm-path="$GITHUB_WORKSPACE/sourcemod" \
+            --mms-path="$GITHUB_WORKSPACE/metamod-source" \
             --enable-optimize \
             --targets=x86
           ambuild
@@ -85,3 +93,35 @@ jobs:
         with:
           name: sm-extension-${{ matrix.os_short }}
           path: staging/*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: sm-extension-linux
+          path: linux
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: sm-extension-windows
+          path: windows
+
+      - name: Create archives
+        run: |
+          cd linux && tar -czf ../sm-extension-linux.tar.gz . && cd ..
+          cd windows && zip -r ../sm-extension-windows.zip . && cd ..
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            sm-extension-linux.tar.gz
+            sm-extension-windows.zip
